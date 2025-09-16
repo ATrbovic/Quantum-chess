@@ -178,3 +178,8 @@ Stakeholders:
         Average move execution time and responsiveness of the GUI.
     Stability:
         Number and severity of bugs reported during beta testing and after release.
+
+To do
+1. Make new features
+2. Test to make sure we are actually using quantum mechanics
+3. Make a gif of the game and add it to README

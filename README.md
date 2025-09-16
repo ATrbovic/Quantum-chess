@@ -38,10 +38,6 @@ Quantum Chess is a Python-based chess engine and GUI that integrates quantum mec
    ```bash
    python main.py
    ```
-   Or to run the demo GUI:
-   ```bash
-   python demo_check_gui.py
-   ```
 
 ## Project Structure
 - `main.py` - Main entry point

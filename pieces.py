@@ -172,13 +172,18 @@ class QuantumChessPiece:
         if self.name.lower() == "pawn":
             if self.color == "w":  # White pawn moves upward (decreasing row)
                 print(f"Checking forward move for white pawn at ({row}, {col})")
+                # One square forward
                 if row > 0 and board[row - 1][col] is None:
                     move = grid_to_position(row - 1, col)
                     valid_moves.append(move)
                     print(f"Added move: {move}")
+                    # Two squares forward from starting position
+                    if row == 6 and board[row - 2][col] is None:
+                        move2 = grid_to_position(row - 2, col)
+                        valid_moves.append(move2)
+                        print(f"Added two-square move: {move2}")
                 else:
                     print(f"Square ({row - 1}, {col}) is not empty")
-                
                 # Diagonal captures for white pawn
                 if row > 0 and col > 0:
                     print(f"Checking capture move at ({row - 1}, {col - 1})")
@@ -198,13 +203,18 @@ class QuantumChessPiece:
                         print(f"Square ({row - 1}, {col + 1}) is empty or not an enemy piece")
             elif self.color == "b":  # Black pawn moves downward (increasing row)
                 print(f"Checking forward move for black pawn at ({row}, {col})")
+                # One square forward
                 if row < 7 and board[row + 1][col] is None:
                     move = grid_to_position(row + 1, col)
                     valid_moves.append(move)
                     print(f"Added move: {move}")
+                    # Two squares forward from starting position
+                    if row == 1 and board[row + 2][col] is None:
+                        move2 = grid_to_position(row + 2, col)
+                        valid_moves.append(move2)
+                        print(f"Added two-square move: {move2}")
                 else:
                     print(f"Square ({row + 1}, {col}) is not empty")
-                
                 # Diagonal captures for black pawn
                 if row < 7 and col > 0:
                     print(f"Checking capture move at ({row + 1}, {col - 1})")

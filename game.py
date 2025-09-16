@@ -18,6 +18,25 @@ class QuantumSimulationThread(QThread):
         self.finished.emit(outcome)
 
 class QuantumChessGame:
+
+    def is_king_in_check(self, color):
+        """Return True if the king of the given color is in check by any opponent piece."""
+        # Find the king's position
+        king_name = f"{color[0]}_king"
+        king_piece = self.pieces.get(king_name)
+        if not king_piece:
+            print(f"No {color} king found!")
+            return False
+        king_pos = king_piece.position
+        opponent_color = "b" if color == "white" else "w"
+        # Check all opponent pieces
+        for piece in self.pieces.values():
+            if piece.color == opponent_color:
+                moves = piece.get_valid_moves(self.board)
+                if king_pos in moves:
+                    print(f"{color.capitalize()} king is in check by {piece.name} at {piece.position}")
+                    return True
+        return False
     def __init__(self):
         self.num_qubits = 32  # Adjust based on the number of pieces and desired complexity
         self.qc = initialize_circuit(self.num_qubits)
@@ -74,6 +93,11 @@ class QuantumChessGame:
         piece = self.pieces[piece_name]
         start_row, start_col = position_to_grid(piece.position)
         end_row, end_col = position_to_grid(target_position)
+
+        # Validate move before executing
+        if not self.validate_move(piece_name, target_position):
+            print(f"Invalid move: {piece_name} to {target_position}")
+            return False
 
         # Handle captures
         target_piece = self.board[end_row][end_col]
@@ -132,7 +156,34 @@ class QuantumChessGame:
         print("\n" + "-" * 17 + "\n")
 
     def validate_move(self, piece_name, target_position):
-        # Placeholder for move validation logic
+        # Prevent king captures - the game should end before this happens
+        piece = self.pieces[piece_name]
+        start_row, start_col = position_to_grid(piece.position)
+        end_row, end_col = position_to_grid(target_position)
+        
+        # Check if trying to capture a king directly
+        target_piece = self.board[end_row][end_col]
+        if target_piece and target_piece.name.lower() == "king":
+            print("Cannot capture the king directly! This should be checkmate.")
+            return False
+        
+        # Save current state
+        original_piece_at_target = self.board[end_row][end_col]
+        original_position = piece.position
+        # Simulate move
+        self.board[start_row][start_col] = None
+        self.board[end_row][end_col] = piece
+        piece.position = target_position
+        # Check if own king is in check
+        king_in_check = self.is_king_in_check('white' if piece.color == 'w' else 'black')
+        # Undo move
+        piece.position = original_position
+        self.board[start_row][start_col] = piece
+        self.board[end_row][end_col] = original_piece_at_target
+        # Only allow move if king is not in check
+        if king_in_check:
+            print("Move would leave king in check! Not allowed.")
+            return False
         return True
 
     def execute_move(self, piece_name, target_position, move_type="superposition"):
