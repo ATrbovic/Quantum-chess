@@ -1,0 +1,15 @@
+# Ignore Python cache and virtual environment directories
+__pycache__/
+myenv/
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+
+# Ignore environment variables and config
+.env
+
+# VS Code settings (optional)
+.vscode/
+
+# Ignore prd.txt
+prd.txt
