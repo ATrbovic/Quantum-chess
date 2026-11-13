@@ -1,202 +1,241 @@
+"""Chess variant with at most ten coherent binary position choices."""
+
 from pieces import QuantumChessPiece
-from quantum_logic import initialize_circuit, apply_superposition, entangle_pieces, measure_circuit
-from utils import position_to_grid, grid_to_position
-from PyQt5.QtCore import QThread, pyqtSignal
+from quantum_logic import MAX_QUBITS, QuantumRegister
+from utils import position_to_grid
 
-class QuantumSimulationThread(QThread):
-    """Thread to run the quantum simulation asynchronously."""
-    finished = pyqtSignal(str)  # Signal to emit the measurement outcome.
-
-    def __init__(self, qc, qubit_indices):
-        super().__init__()
-        self.qc = qc
-        self.qubit_indices = qubit_indices
-
-    def run(self):
-        """Run the quantum simulation and emit the result."""
-        outcome = measure_circuit(self.qc, self.qubit_indices)
-        self.finished.emit(outcome)
 
 class QuantumChessGame:
+    def __init__(self, num_qubits=MAX_QUBITS, seed=None):
+        self.quantum = QuantumRegister(num_qubits, seed=seed)
+        self.num_qubits = self.quantum.num_qubits
+        self.pieces = {}
+        self.branches = {}  # piece id -> (position if 0, position if 1)
+        self.current_turn = "white"
+        self.last_message = "Select a piece and a move mode."
+        self.last_measurement = {}
+        for color, pawn_rank, back_rank in (("w", 2, 1), ("b", 7, 8)):
+            for i, file in enumerate("abcdefgh", 1):
+                self.pieces[f"{color}_pawn{i}"] = QuantumChessPiece(
+                    "Pawn", None, f"{file}{pawn_rank}", color)
+            for kind, files in (("Rook", "ah"), ("Knight", "bg"),
+                                ("Bishop", "cf"), ("Queen", "d"), ("King", "e")):
+                for i, file in enumerate(files, 1):
+                    suffix = str(i) if len(files) == 2 else ""
+                    self.pieces[f"{color}_{kind.lower()}{suffix}"] = QuantumChessPiece(
+                        kind, None, f"{file}{back_rank}", color)
+        self._rebuild_board()
+
+    @property
+    def qc(self):
+        return self.quantum.circuit
+
+    @property
+    def active_qubits(self):
+        return self.quantum.active_qubits
+
+    def positions_for(self, piece_name):
+        return self.branches.get(piece_name, (self.pieces[piece_name].position,))
+
+    def _rebuild_board(self):
+        # Both branch squares are reserved. Other pieces cannot enter or pass
+        # through either square until the joint measurement resolves the board.
+        self.board = [[None for _ in range(8)] for _ in range(8)]
+        for name, piece in self.pieces.items():
+            for position in self.positions_for(name):
+                row, col = position_to_grid(position)
+                if self.board[row][col] is not None:
+                    raise RuntimeError("Two pieces cannot reserve the same square.")
+                self.board[row][col] = piece
+
+    def _possible_boards(self):
+        if not self.branches:
+            yield [row[:] for row in self.board]
+            return
+        # Check only branches with nonzero amplitude, preserving correlations.
+        for bits, probability in self.quantum.probabilities().items():
+            if probability < 1e-12:
+                continue
+            board = [[None for _ in range(8)] for _ in range(8)]
+            for name, piece in self.pieces.items():
+                position = piece.position
+                if name in self.branches:
+                    bit = int(bits[-1 - self.quantum.allocations[name]])
+                    position = self.branches[name][bit]
+                row, col = position_to_grid(position)
+                board[row][col] = piece
+            yield board
+
+    @staticmethod
+    def _in_check(board, color):
+        king = next(((r, c) for r in range(8) for c in range(8)
+                     if board[r][c] is not None and board[r][c].color == color
+                     and board[r][c].name == "King"), None)
+        if king is None:
+            return True
+        kr, kc = king
+        for r in range(8):
+            for c in range(8):
+                piece = board[r][c]
+                if piece is None or piece.color == color:
+                    continue
+                dr, dc = kr - r, kc - c
+                if piece.name == "Pawn":
+                    if dr == (-1 if piece.color == "w" else 1) and abs(dc) == 1:
+                        return True
+                elif piece.name == "Knight":
+                    if (abs(dr), abs(dc)) in {(1, 2), (2, 1)}:
+                        return True
+                elif piece.name == "King":
+                    if max(abs(dr), abs(dc)) == 1:
+                        return True
+                else:
+                    straight = dr == 0 or dc == 0
+                    diagonal = abs(dr) == abs(dc)
+                    if not ((straight and piece.name in {"Rook", "Queen"})
+                            or (diagonal and piece.name in {"Bishop", "Queen"})):
+                        continue
+                    sr, sc = (dr > 0) - (dr < 0), (dc > 0) - (dc < 0)
+                    nr, nc = r + sr, c + sc
+                    while (nr, nc) != king and board[nr][nc] is None:
+                        nr, nc = nr + sr, nc + sc
+                    if (nr, nc) == king:
+                        return True
+        return False
 
     def is_king_in_check(self, color):
-        """Return True if the king of the given color is in check by any opponent piece."""
-        # Find the king's position
-        king_name = f"{color[0]}_king"
-        king_piece = self.pieces.get(king_name)
-        if not king_piece:
-            print(f"No {color} king found!")
-            return False
-        king_pos = king_piece.position
-        opponent_color = "b" if color == "white" else "w"
-        # Check all opponent pieces
-        for piece in self.pieces.values():
-            if piece.color == opponent_color:
-                moves = piece.get_valid_moves(self.board)
-                if king_pos in moves:
-                    print(f"{color.capitalize()} king is in check by {piece.name} at {piece.position}")
-                    return True
-        return False
-    def __init__(self):
-        self.num_qubits = 32  # Adjust based on the number of pieces and desired complexity
-        self.qc = initialize_circuit(self.num_qubits)
+        return any(self._in_check(board, color[0]) for board in self._possible_boards())
 
-        # Initialize the board with None for empty squares
-        self.board = [[None for _ in range(8)] for _ in range(8)]
-
-        # Initialize white pieces
-        self.pieces = {
-            "w_pawn1": QuantumChessPiece("Pawn", 0, "a2", "w"),
-            "w_pawn2": QuantumChessPiece("Pawn", 1, "b2", "w"),
-            "w_pawn3": QuantumChessPiece("Pawn", 2, "c2", "w"),
-            "w_pawn4": QuantumChessPiece("Pawn", 3, "d2", "w"),
-            "w_pawn5": QuantumChessPiece("Pawn", 4, "e2", "w"),
-            "w_pawn6": QuantumChessPiece("Pawn", 5, "f2", "w"),
-            "w_pawn7": QuantumChessPiece("Pawn", 6, "g2", "w"),
-            "w_pawn8": QuantumChessPiece("Pawn", 7, "h2", "w"),
-            "w_rook1": QuantumChessPiece("Rook", 8, "a1", "w"),
-            "w_rook2": QuantumChessPiece("Rook", 9, "h1", "w"),
-            "w_knight1": QuantumChessPiece("Knight", 10, "b1", "w"),
-            "w_knight2": QuantumChessPiece("Knight", 11, "g1", "w"),
-            "w_bishop1": QuantumChessPiece("Bishop", 12, "c1", "w"),
-            "w_bishop2": QuantumChessPiece("Bishop", 13, "f1", "w"),
-            "w_queen": QuantumChessPiece("Queen", 14, "d1", "w"),
-            "w_king": QuantumChessPiece("King", 15, "e1", "w"),
-
-            # Initialize black pieces
-            "b_pawn1": QuantumChessPiece("Pawn", 16, "a7", "b"),
-            "b_pawn2": QuantumChessPiece("Pawn", 17, "b7", "b"),
-            "b_pawn3": QuantumChessPiece("Pawn", 18, "c7", "b"),
-            "b_pawn4": QuantumChessPiece("Pawn", 19, "d7", "b"),
-            "b_pawn5": QuantumChessPiece("Pawn", 20, "e7", "b"),
-            "b_pawn6": QuantumChessPiece("Pawn", 21, "f7", "b"),
-            "b_pawn7": QuantumChessPiece("Pawn", 22, "g7", "b"),
-            "b_pawn8": QuantumChessPiece("Pawn", 23, "h7", "b"),
-            "b_rook1": QuantumChessPiece("Rook", 24, "a8", "b"),
-            "b_rook2": QuantumChessPiece("Rook", 25, "h8", "b"),
-            "b_knight1": QuantumChessPiece("Knight", 26, "b8", "b"),
-            "b_knight2": QuantumChessPiece("Knight", 27, "g8", "b"),
-            "b_bishop1": QuantumChessPiece("Bishop", 28, "c8", "b"),
-            "b_bishop2": QuantumChessPiece("Bishop", 29, "f8", "b"),
-            "b_queen": QuantumChessPiece("Queen", 30, "d8", "b"),
-            "b_king": QuantumChessPiece("King", 31, "e8", "b"),
-        }
-
-        # Place pieces on the board
-        for piece_name, piece in self.pieces.items():
-            row, col = position_to_grid(piece.position)
-            self.board[row][col] = piece
-
-        self.current_turn = "white"
-
-    def move_piece(self, piece_name, target_position, move_type="superposition"):
+    def _validate_move(self, piece_name, target_position, move_type, entangle_with):
+        if move_type not in {"classical", "superposition", "entangle"}:
+            raise ValueError("Choose classical, superposition, or entangle.")
+        position_to_grid(target_position)
+        if piece_name not in self.pieces:
+            raise ValueError("Select a piece on the board.")
         piece = self.pieces[piece_name]
-        start_row, start_col = position_to_grid(piece.position)
-        end_row, end_col = position_to_grid(target_position)
+        if piece.color != self.current_turn[0]:
+            raise ValueError(f"It is {self.current_turn}'s turn.")
+        if piece_name in self.branches:
+            raise ValueError("Measure the board before moving a split piece.")
+        if target_position not in piece.get_valid_moves(self.board):
+            raise ValueError("That piece cannot move to this square.")
+        er, ec = position_to_grid(target_position)
+        occupant = self.board[er][ec]
+        if occupant is not None:
+            if occupant.name == "King":
+                raise ValueError("Kings cannot be captured.")
+            if any(occupant is self.pieces[name] for name in self.branches):
+                raise ValueError("Measure the board before capturing a split piece.")
+        if move_type != "classical":
+            if self.active_qubits >= self.num_qubits:
+                raise ValueError("All qubits are in use. Measure the board to free them.")
+            if occupant is not None or piece.name == "King":
+                raise ValueError("Split moves require an empty square and a non-king piece.")
+            if piece.name == "Pawn" and er in (0, 7):
+                raise ValueError("Use a classical move to promote a pawn.")
+        if move_type == "entangle":
+            if (entangle_with not in self.branches
+                    or self.pieces[entangle_with].color != piece.color):
+                raise ValueError("Choose one of your already split pieces as the control.")
+        sr, sc = position_to_grid(piece.position)
+        for board in self._possible_boards():
+            if move_type != "classical" and self._in_check(board, piece.color):
+                raise ValueError("Resolve check with a classical move before splitting.")
+            board[sr][sc] = None
+            board[er][ec] = piece
+            if self._in_check(board, piece.color):
+                raise ValueError("This move could leave your king in check.")
 
-        # Validate move before executing
-        if not self.validate_move(piece_name, target_position):
-            print(f"Invalid move: {piece_name} to {target_position}")
+    def validate_move(self, piece_name, target_position, move_type="classical", entangle_with=None):
+        try:
+            self._validate_move(piece_name, target_position, move_type, entangle_with)
+        except ValueError as error:
+            self.last_message = str(error)
             return False
+        return True
 
-        # Handle captures
-        target_piece = self.board[end_row][end_col]
-        if target_piece and target_piece.color != piece.color:
-            print(f"{piece.name} captures {target_piece.name} at {target_position}!")
-            # Find and remove the captured piece from the pieces dictionary
-            captured_piece_name = None
-            for name, p in self.pieces.items():
-                if p is target_piece:
-                    captured_piece_name = name
-                    break
-            if captured_piece_name:
-                del self.pieces[captured_piece_name]
+    def legal_moves(self, piece_name, move_type="classical", entangle_with=None):
+        if piece_name not in self.pieces or piece_name in self.branches:
+            return []
+        legal = []
+        for target in self.pieces[piece_name].get_valid_moves(self.board):
+            try:
+                self._validate_move(piece_name, target, move_type, entangle_with)
+            except ValueError:
+                continue
+            legal.append(target)
+        return legal
 
-        # Update board position immediately for visual feedback
-        self.board[end_row][end_col] = piece
-        self.board[start_row][start_col] = None
-        piece.position = target_position
-
-        # Skip quantum simulation for classical moves
+    def move_piece(self, piece_name, target_position, move_type="classical", entangle_with=None):
+        if move_type == "measure":
+            return self.measure_board()
+        if not self.validate_move(piece_name, target_position, move_type, entangle_with):
+            return False
+        piece = self.pieces[piece_name]
         if move_type == "classical":
-            self.switch_turn()
-            return
-
-        # Handle quantum operations asynchronously
-        self.simulation_thread = QuantumSimulationThread(self.qc, [piece.qubit_index])
-        self.simulation_thread.finished.connect(self.handle_simulation_result)
-        
-        # Apply quantum operations in the thread
-        if move_type == "superposition":
-            self.qc = apply_superposition(self.qc, piece.qubit_index)
-        elif move_type == "entangle":
-            if piece.qubit_index + 1 < self.num_qubits:
-                self.qc = entangle_pieces(self.qc, piece.qubit_index, piece.qubit_index + 1)
-        
-        # Start the thread
-        self.simulation_thread.start()
-
-    def handle_simulation_result(self, outcome):
-        """Handle the quantum simulation result"""
-        print(f"Quantum operation completed with outcome: {outcome}")
-        # Update the GUI here if needed
+            captured = next((name for name, other in self.pieces.items()
+                             if other.position == target_position), None)
+            if captured is not None:
+                del self.pieces[captured]
+            piece.position = target_position
+            if piece.name == "Pawn" and target_position[1] in "18":
+                piece.name = "Queen"
+            self.last_message = f"{self.current_turn.capitalize()} {piece.name.lower()} moved to {target_position}."
+        else:
+            control = entangle_with if move_type == "entangle" else None
+            piece.qubit_index = self.quantum.split(piece_name, control=control)
+            self.branches[piece_name] = (piece.position, target_position)
+            self.last_message = (
+                f"{self.current_turn.capitalize()} {piece.name.lower()}: "
+                f"{piece.position} or {target_position} (q{piece.qubit_index})."
+            )
+            if control is not None:
+                self.last_message += f" Correlated with q{self.pieces[control].qubit_index}."
+        self._rebuild_board()
         self.switch_turn()
+        return True
+
+    def measure_board(self):
+        if not self.branches:
+            self.last_message = "No split pieces to measure."
+            return False
+        if self.is_king_in_check(self.current_turn):
+            self.last_message = "Move out of check in every branch before using a turn to measure."
+            return False
+        outcomes = self.quantum.measure_all()
+        for name, bit in outcomes.items():
+            self.pieces[name].position = self.branches[name][bit]
+            self.pieces[name].qubit_index = None
+        self.last_measurement = outcomes
+        self.branches.clear()
+        self._rebuild_board()
+        self.last_message = "Measured: " + ", ".join(
+            f"{'White' if self.pieces[name].color == 'w' else 'Black'} "
+            f"{self.pieces[name].name.lower()} → {self.pieces[name].position}" for name in outcomes)
+        self.switch_turn()
+        return True
 
     def switch_turn(self):
         self.current_turn = "black" if self.current_turn == "white" else "white"
 
-    def is_game_over(self):
-        # Placeholder for game-over conditions (e.g., checkmate)
-        return False
+    def execute_move(self, piece_name, target_position, move_type="classical", entangle_with=None):
+        return self.move_piece(piece_name, target_position, move_type, entangle_with)
 
     def display_board(self):
-        # Placeholder for displaying the current state of the board
         for row in self.board:
-            print(" ".join([piece.name[0] if piece else '.' for piece in row]))
-        print("\n" + "-" * 17 + "\n")
-
-    def validate_move(self, piece_name, target_position):
-        # Prevent king captures - the game should end before this happens
-        piece = self.pieces[piece_name]
-        start_row, start_col = position_to_grid(piece.position)
-        end_row, end_col = position_to_grid(target_position)
-        
-        # Check if trying to capture a king directly
-        target_piece = self.board[end_row][end_col]
-        if target_piece and target_piece.name.lower() == "king":
-            print("Cannot capture the king directly! This should be checkmate.")
-            return False
-        
-        # Save current state
-        original_piece_at_target = self.board[end_row][end_col]
-        original_position = piece.position
-        # Simulate move
-        self.board[start_row][start_col] = None
-        self.board[end_row][end_col] = piece
-        piece.position = target_position
-        # Check if own king is in check
-        king_in_check = self.is_king_in_check('white' if piece.color == 'w' else 'black')
-        # Undo move
-        piece.position = original_position
-        self.board[start_row][start_col] = piece
-        self.board[end_row][end_col] = original_piece_at_target
-        # Only allow move if king is not in check
-        if king_in_check:
-            print("Move would leave king in check! Not allowed.")
-            return False
-        return True
-
-    def execute_move(self, piece_name, target_position, move_type="superposition"):
-        if self.validate_move(piece_name, target_position):
-            self.move_piece(piece_name, target_position, move_type)
-        else:
-            print("Invalid move. Try again.")
+            print(" ".join(piece.name[0] if piece else "." for piece in row))
 
     def start_game(self):
-        # Main game loop
-        while not self.is_game_over():
+        while True:
             self.display_board()
-            piece_name = input(f"{self.current_turn}'s turn. Enter piece name to move: ")
-            target_position = input("Enter target position: ")
-            move_type = input("Enter move type (superposition, entangle, classical, measure): ")
-            self.execute_move(piece_name, target_position, move_type)
+            piece = input(f"{self.current_turn}: piece, measure, or quit: ")
+            if piece == "quit":
+                return
+            if piece == "measure":
+                self.measure_board()
+            else:
+                target = input("Target square: ")
+                mode = input("Mode (classical, superposition, entangle): ")
+                control = input("Split control piece: ") if mode == "entangle" else None
+                self.move_piece(piece, target, mode, control)
+            print(self.last_message)

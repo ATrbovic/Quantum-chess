@@ -1,6 +1,8 @@
 # Ignore Python cache and virtual environment directories
 __pycache__/
 myenv/
+.venv/
+.pytest_cache/
 
 # Byte-compiled / optimized / DLL files
 *.py[cod]

@@ -1,226 +1,176 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QGridLayout, QWidget, QLabel, QVBoxLayout, QStatusBar
+"""Desktop controls for the bounded quantum chess variant."""
+
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from PyQt5.QtCore import Qt, pyqtSignal
-from game import QuantumChessGame
-from utils import position_to_grid, grid_to_position
+from PyQt5.QtWidgets import (
+    QComboBox, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+    QPushButton, QVBoxLayout, QWidget,
+)
 
-class ClickableLabel(QLabel):
-    clicked = pyqtSignal()
+from utils import grid_to_position
 
-    def __init__(self, text, parent=None):
-        super().__init__(text, parent)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
+SYMBOLS = {
+    "w": dict(zip(("King", "Queen", "Rook", "Bishop", "Knight", "Pawn"), "♔♕♖♗♘♙")),
+    "b": dict(zip(("King", "Queen", "Rook", "Bishop", "Knight", "Pawn"), "♚♛♜♝♞♟")),
+}
+
 
 class ChessGUI(QMainWindow):
     def __init__(self, game):
         super().__init__()
         self.game = game
-        self.setWindowTitle("Quantum Chess")
-        self.setGeometry(100, 100, 600, 650)
-        
-        # Create central widget and main layout
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        main_layout = QVBoxLayout()
-        self.central_widget.setLayout(main_layout)
-        
-        # Create status label
-        self.status_label = QLabel("White's Turn")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setFont(QFont("Arial", 16, QFont.Bold))
-        self.status_label.setStyleSheet("background-color: #E6E6FA; padding: 10px; border: 2px solid #4B0082;")
-        main_layout.addWidget(self.status_label)
-        
-        # Create board layout
-        self.layout = QGridLayout()
-        board_widget = QWidget()
-        board_widget.setLayout(self.layout)
-        main_layout.addWidget(board_widget)
-        
-        self.squares = {}
-        self.piece_labels = {}
         self.selected_piece = None
-        self.create_board()
-        self.place_pieces()
-        self.update_status()
+        self.setWindowTitle("Quantum Chess · Qiskit")
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        self.status_label = QLabel()
+        self.status_label.setFont(QFont("Arial", 16, QFont.Bold))
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        controls = QHBoxLayout()
+        self.move_mode = QComboBox()
+        self.move_mode.addItem("Classical move", "classical")
+        self.move_mode.addItem("Split: stay or move", "superposition")
+        self.move_mode.addItem("Entangled split", "entangle")
+        controls.addWidget(self.move_mode)
+        self.control_piece = QComboBox()
+        self.control_piece.setToolTip("An already split piece of your color controls the new branch.")
+        controls.addWidget(self.control_piece)
+        self.measure_button = QPushButton("Measure board")
+        self.measure_button.setToolTip("Resolve all branches together and free their qubits. Uses your turn.")
+        self.measure_button.clicked.connect(self.measure_board)
+        controls.addWidget(self.measure_button)
+        layout.addLayout(controls)
+
+        self.board_layout = QGridLayout()
+        self.board_layout.setSpacing(0)
+        layout.addLayout(self.board_layout)
+        self.squares = {}
+        for i, file in enumerate("abcdefgh"):
+            file_label = QLabel(file)
+            file_label.setAlignment(Qt.AlignCenter)
+            self.board_layout.addWidget(file_label, 8, i + 1)
+            rank_label = QLabel(str(8 - i))
+            rank_label.setAlignment(Qt.AlignCenter)
+            self.board_layout.addWidget(rank_label, i, 0)
+        for row in range(8):
+            for col in range(8):
+                button = QPushButton()
+                button.setFixedSize(64, 64)
+                button.setFont(QFont("Arial", 26))
+                button.clicked.connect(lambda checked=False, r=row, c=col: self.on_square_click(r, c))
+                self.board_layout.addWidget(button, row, col + 1)
+                self.squares[(row, col)] = button
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        self.message_label.setMinimumHeight(48)
+        self.message_label.setMaximumWidth(520)
+        layout.addWidget(self.message_label)
+        help_label = QLabel(
+            "Select a piece, then a highlighted square. Split pieces occupy two reserved squares; "
+            "a 0 outcome stays and a 1 outcome moves. Entangled splits share the control's outcome. "
+            "Measure before moving or capturing a split piece. Measurement uses a turn."
+        )
+        help_label.setWordWrap(True)
+        help_label.setMaximumWidth(520)
+        layout.addWidget(help_label)
+        self.move_mode.currentIndexChanged.connect(self.mode_changed)
+        self.control_piece.currentIndexChanged.connect(self.highlight_valid_moves)
+        self.update_board()
+
+    def mode_changed(self):
+        self.control_piece.setEnabled(self.move_mode.currentData() == "entangle")
+        self.highlight_valid_moves()
 
     def update_status(self):
-        """Update the status label with current turn information."""
-        current_player = "White" if self.game.current_turn == "white" else "Black"
-        self.status_label.setText(f"{current_player}'s Turn")
-        
-        # Change color based on current player
-        if self.game.current_turn == "white":
-            self.status_label.setStyleSheet("background-color: #E6E6FA; color: #4B0082; padding: 10px; border: 2px solid #4B0082; font-weight: bold;")
-        else:
-            self.status_label.setStyleSheet("background-color: #FFE4E1; color: #8B0000; padding: 10px; border: 2px solid #8B0000; font-weight: bold;")
-
-    def on_square_click(self, row, col):
-        """Handle click events on the squares."""
-        if self.selected_piece:
-            piece_name = self.selected_piece
-            try:
-                piece = self.game.pieces[piece_name]
-                target_position = grid_to_position(row, col)
-
-                if target_position in piece.get_valid_moves(self.game.board):
-                    self.game.move_piece(piece_name, target_position, move_type="classical")
-                    self.update_board()
-                    self.update_status()
-                    self.selected_piece = None
-                    print(f"Moved {piece_name} to {target_position}")
-                else:
-                    print(f"Invalid move for {piece_name} to {target_position}")
-            except KeyError:
-                print(f"Error: Piece {piece_name} not found in pieces dictionary")
-                self.selected_piece = None
-                self.update_board()
-            except Exception as e:
-                print(f"Error during move: {e}")
-                self.selected_piece = None
-                self.update_board()
-        else:
-            print(f"No piece selected. Clicked on square ({row}, {col})")
-
-    def update_gui(self):
-        """Update the board display based on the current game state."""
-        for piece_name, (label, _) in self.piece_labels.items():
-            label.deleteLater()
-        self.piece_labels.clear()
-        self.place_pieces()
-
-    def create_board(self):
-        """Create the chessboard with alternating colors and square IDs."""
-        for row in range(8):
-            for col in range(8):
-                # Traditional chess board colors
-                color = "#F0D9B5" if (row + col) % 2 == 0 else "#B58863"
-                frame = QWidget()
-                frame.setStyleSheet(f"background-color: {color}; border: 1px solid #8B4513;")
-                frame.setFixedSize(60, 60)
-                self.layout.addWidget(frame, row, col)
-
-                # Store frame with its position
-                self.squares[(row, col)] = frame
-
-                # Connect square click event
-                frame.mousePressEvent = lambda event, row=row, col=col: self.on_square_click(row, col)
-
-    def place_pieces(self):
-        """Place the pieces on the board based on the game state."""
-        # Unicode chess piece symbols
-        piece_symbols = {
-            "w": {
-                "Pawn": "♙", "Rook": "♖", "Knight": "♘", 
-                "Bishop": "♗", "Queen": "♕", "King": "♔"
-            },
-            "b": {
-                "Pawn": "♟", "Rook": "♜", "Knight": "♞", 
-                "Bishop": "♝", "Queen": "♛", "King": "♚"
-            }
-        }
-        
-        for piece_name, piece in self.game.pieces.items():
-            row, col = position_to_grid(piece.position)
-            print(f"Placing {piece.name} at {piece.position} -> grid ({row}, {col})")
-            
-            # Get the appropriate symbol
-            symbol = piece_symbols[piece.color][piece.name]
-            
-            label = ClickableLabel(symbol, self.squares[(row, col)])
-            label.setAlignment(Qt.AlignCenter)
-            label.setFont(QFont("Arial", 24, QFont.Bold))
-            
-            # Different styling for white and black pieces
-            if piece.color == "w":
-                label.setStyleSheet("background-color: lightblue; border: 2px solid darkblue; color: white; font-weight: bold;")
-            else:
-                label.setStyleSheet("background-color: darkred; border: 2px solid maroon; color: white; font-weight: bold;")
-            
-            label.clicked.connect(self.on_piece_click)
-            label.show()
-            self.piece_labels[piece_name] = (label, (row, col))
-            print(f"Label for {piece.name} created at grid ({row}, {col})")
-
-    def on_piece_click(self):
-        """Handle click events on the pieces."""
-        sender = self.sender()
-        piece_name = None
-
-        # Find which piece was clicked
-        for name, (label, _) in self.piece_labels.items():
-            if label == sender:
-                piece_name = name
-                break
-
-        if piece_name:
-            piece = self.game.pieces[piece_name]
-            
-            # Check if it's the correct player's turn
-            if (self.game.current_turn == "white" and piece.color == "w") or \
-               (self.game.current_turn == "black" and piece.color == "b"):
-                print(f"Piece {piece_name} clicked!")
-                self.selected_piece = piece_name
-                self.highlight_valid_moves(piece_name)
-            else:
-                current_player = "White" if self.game.current_turn == "white" else "Black"
-                print(f"It's {current_player}'s turn! You can't move the opponent's pieces.")
-                self.status_label.setText(f"It's {current_player}'s turn!")
-                # Flash the status for emphasis
-                self.status_label.setStyleSheet("background-color: #FF6B6B; color: white; padding: 10px; border: 2px solid #FF0000; font-weight: bold;")
-                # Reset after a moment (you could use QTimer for this, but for now this is simpler)
-                QApplication.processEvents()
-                import time
-                time.sleep(0.5)
-                self.update_status()
-
-    def highlight_valid_moves(self, piece_name):
-        """Highlight valid moves for the selected piece."""
-        piece = self.game.pieces[piece_name]
-        valid_moves = piece.get_valid_moves(self.game.board)
-        print(f"Valid moves for {piece_name}: {valid_moves}")
-
-        # Reset all square styles to default
-        for row in range(8):
-            for col in range(8):
-                color = "#F0D9B5" if (row + col) % 2 == 0 else "#B58863"  # Chess board colors
-                self.squares[(row, col)].setStyleSheet(f"background-color: {color}; border: 1px solid #8B4513;")
-
-        # Highlight the selected piece
-        selected_row, selected_col = position_to_grid(piece.position)
-        self.squares[(selected_row, selected_col)].setStyleSheet("background-color: #FFD700; border: 2px solid #FF8C00;")
-
-        # Highlight valid moves
-        for move in valid_moves:
-            row, col = position_to_grid(move)
-            self.squares[(row, col)].setStyleSheet("background-color: #90EE90; border: 2px solid #32CD32;")
-
-    def on_square_click(self, row, col):
-        """Handle click events on the squares."""
-        if self.selected_piece:
-            piece_name = self.selected_piece
-            piece = self.game.pieces[piece_name]
-            target_position = grid_to_position(row, col)
-
-            if target_position in piece.get_valid_moves(self.game.board):
-                self.game.move_piece(piece_name, target_position, move_type="classical")
-                self.update_board()
-                self.selected_piece = None
-                print(f"Moved {piece_name} to {target_position}")
-            else:
-                print(f"Invalid move for {piece_name} to {target_position}")
+        check = " · Check" if self.game.is_king_in_check(self.game.current_turn) else ""
+        self.status_label.setText(
+            f"{self.game.current_turn.capitalize()}'s turn · "
+            f"Qubits {self.game.active_qubits}/{self.game.num_qubits} · Qiskit{check}"
+        )
+        self.message_label.setText(self.game.last_message)
 
     def update_board(self):
-        """Update the board display based on the current game state."""
-        for piece_name, (label, _) in self.piece_labels.items():
-            label.deleteLater()
-        self.piece_labels.clear()
-        self.place_pieces()
+        previous = self.control_piece.currentData()
+        self.control_piece.blockSignals(True)
+        self.control_piece.clear()
+        for name in self.game.branches:
+            if self.game.pieces[name].color == self.game.current_turn[0]:
+                piece = self.game.pieces[name]
+                squares = " / ".join(self.game.positions_for(name))
+                self.control_piece.addItem(f"{piece.name} {squares} (q{piece.qubit_index})", name)
+        index = self.control_piece.findData(previous)
+        if index >= 0:
+            self.control_piece.setCurrentIndex(index)
+        if self.control_piece.count() == 0:
+            self.control_piece.addItem("No split control available", None)
+        self.control_piece.blockSignals(False)
+        self.control_piece.setEnabled(self.move_mode.currentData() == "entangle")
+        self.measure_button.setEnabled(bool(self.game.branches))
+        self.update_status()
+        self.highlight_valid_moves()
+
+    def highlight_valid_moves(self, *_):
+        mode = self.move_mode.currentData()
+        control = self.control_piece.currentData()
+        legal = self.game.legal_moves(self.selected_piece, mode, control) if self.selected_piece else []
+        selected = self.game.positions_for(self.selected_piece) if self.selected_piece else ()
+        names = {id(piece): name for name, piece in self.game.pieces.items()}
+        for (row, col), button in self.squares.items():
+            position = grid_to_position(row, col)
+            piece = self.game.board[row][col]
+            color = "#F0D9B5" if (row + col) % 2 == 0 else "#B58863"
+            if position in legal:
+                color = "#90EE90"
+            if position in selected:
+                color = "#FFD700"
+            button.setStyleSheet(f"background-color: {color}; color: #151515; border: 1px solid #735539;")
+            if piece is None:
+                button.setText("")
+                button.setToolTip(position)
+                continue
+            name = names[id(piece)]
+            suffix = ""
+            detail = f"{name} · {position}"
+            if name in self.game.branches:
+                bit = self.game.branches[name].index(position)
+                suffix = str(bit)
+                detail += f" · q{piece.qubit_index} branch {bit} · measure to resolve"
+            button.setText(SYMBOLS[piece.color][piece.name] + suffix)
+            button.setToolTip(detail)
+
+    def on_square_click(self, row, col):
+        piece = self.game.board[row][col]
+        names = {id(p): name for name, p in self.game.pieces.items()}
+        if piece is not None and piece.color == self.game.current_turn[0]:
+            self.selected_piece = names[id(piece)]
+            self.highlight_valid_moves()
+            if self.selected_piece in self.game.branches:
+                self.message_label.setText("This piece is split. Measure the board before moving it.")
+            return
+        if self.selected_piece is None:
+            return
+        try:
+            moved = self.game.move_piece(
+                self.selected_piece, grid_to_position(row, col),
+                self.move_mode.currentData(), self.control_piece.currentData(),
+            )
+            if moved:
+                self.selected_piece = None
+            self.update_board()
+        except Exception as error:
+            self.message_label.setText(f"Move failed: {error}")
+
+    def measure_board(self):
+        try:
+            self.game.measure_board()
+            self.selected_piece = None
+            self.update_board()
+        except Exception as error:
+            self.message_label.setText(f"Measurement failed: {error}")
 
     def run(self):
-        """Run the main event loop."""
         self.show()
-
